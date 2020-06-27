@@ -59,8 +59,6 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.apache.hbase.thirdparty.com.google.common.io.Closeables;
 
@@ -72,43 +70,34 @@ public class TestAsyncNonMetaRegionLocator {
   public static final HBaseClassTestRule CLASS_RULE =
     HBaseClassTestRule.forClass(TestAsyncNonMetaRegionLocator.class);
 
-  private static final Logger LOG = LoggerFactory.getLogger(TestAsyncNonMetaRegionLocator.class);
-
   private static final HBaseTestingUtil TEST_UTIL = new HBaseTestingUtil();
 
   private static TableName TABLE_NAME = TableName.valueOf("async");
 
   private static byte[] FAMILY = Bytes.toBytes("cf");
-  private static final int META_STOREFILE_REFRESH_PERIOD = 100;
   private static final int NB_SERVERS = 4;
   private static int numOfMetaReplica = NB_SERVERS - 1;
+  private static byte[][] SPLIT_KEYS;
 
   private static AsyncConnectionImpl CONN;
 
-  private static AsyncNonMetaRegionLocator LOCATOR;
-  private static ConnectionRegistry registry;
-
-  private static byte[][] SPLIT_KEYS;
-  private CatalogReplicaMode metaReplicaMode;
+  private AsyncRegionLocator LOCATOR;
+  private ConnectionRegistry registry;
 
   @BeforeClass
   public static void setUp() throws Exception {
     Configuration conf = TEST_UTIL.getConfiguration();
     // Enable hbase:meta replication.
     conf.setBoolean(ServerRegionReplicaUtil.REGION_REPLICA_REPLICATION_CATALOG_CONF_KEY, true);
-    conf.setLong("replication.source.sleepforretries", 10);    // 10 ms
-
+    conf.setLong("replication.source.sleepforretries", 10); // 10 ms
     TEST_UTIL.startMiniCluster(NB_SERVERS);
     Admin admin = TEST_UTIL.getAdmin();
     admin.balancerSwitch(false, true);
 
     // Enable hbase:meta replication.
     HBaseTestingUtil.setReplicas(admin, TableName.META_TABLE_NAME, numOfMetaReplica);
-    TEST_UTIL.waitFor(30000, () -> TEST_UTIL.getMiniHBaseCluster().getRegions(
-      TableName.META_TABLE_NAME).size() >= numOfMetaReplica);
-
-    registry = ConnectionRegistryFactory.getRegistry(TEST_UTIL.getConfiguration());
-
+    TEST_UTIL.waitFor(30000, () -> TEST_UTIL.getMiniHBaseCluster()
+      .getRegions(TableName.META_TABLE_NAME).size() >= numOfMetaReplica);
     SPLIT_KEYS = new byte[8][];
     for (int i = 111; i < 999; i += 111) {
       SPLIT_KEYS[i / 111 - 1] = Bytes.toBytes(String.format("%03d", i));
@@ -146,12 +135,11 @@ public class TestAsyncNonMetaRegionLocator {
     // Enable meta replica LoadBalance mode for this connection.
     if (clientMetaReplicaMode != null) {
       c.set(RegionLocator.LOCATOR_META_REPLICAS_MODE, clientMetaReplicaMode);
-      metaReplicaMode = CatalogReplicaMode.fromString(clientMetaReplicaMode);
     }
-
+    registry = ConnectionRegistryFactory.getRegistry(TEST_UTIL.getConfiguration());
     CONN = new AsyncConnectionImpl(c, registry,
       registry.getClusterId().get(), null, User.getCurrent());
-    LOCATOR = new AsyncNonMetaRegionLocator(CONN);
+    LOCATOR = new AsyncRegionLocator(CONN, AsyncConnectionImpl.RETRY_TIMER);
   }
 
   private void createSingleRegionTable() throws IOException, InterruptedException {
@@ -160,7 +148,7 @@ public class TestAsyncNonMetaRegionLocator {
   }
 
   private CompletableFuture<HRegionLocation> getDefaultRegionLocation(TableName tableName,
-      byte[] row, RegionLocateType locateType, boolean reload) {
+    byte[] row, RegionLocateType locateType, boolean reload) {
     return LOCATOR
       .getRegionLocations(tableName, row, RegionReplicaUtil.DEFAULT_REPLICA_ID, locateType, reload)
       .thenApply(RegionLocations::getDefaultRegionLocation);
@@ -191,7 +179,7 @@ public class TestAsyncNonMetaRegionLocator {
   }
 
   private void assertLocEquals(byte[] startKey, byte[] endKey, ServerName serverName,
-      HRegionLocation loc) {
+    HRegionLocation loc) {
     RegionInfo info = loc.getRegion();
     assertEquals(TABLE_NAME, info.getTable());
     assertArrayEquals(startKey, info.getStartKey());
@@ -418,7 +406,7 @@ public class TestAsyncNonMetaRegionLocator {
   // Testcase for HBASE-20822
   @Test
   public void testLocateBeforeLastRegion()
-      throws IOException, InterruptedException, ExecutionException {
+    throws IOException, InterruptedException, ExecutionException {
     createMultiRegionTable();
     getDefaultRegionLocation(TABLE_NAME, SPLIT_KEYS[0], RegionLocateType.CURRENT, false).join();
     HRegionLocation loc =
@@ -436,13 +424,13 @@ public class TestAsyncNonMetaRegionLocator {
 
       @Override
       public void updateCachedLocationOnError(HRegionLocation loc, Throwable error)
-          throws Exception {
+        throws Exception {
         LOCATOR.updateCachedLocationOnError(loc, error);
       }
 
       @Override
       public RegionLocations getRegionLocations(TableName tableName, int replicaId, boolean reload)
-          throws Exception {
+        throws Exception {
         return LOCATOR.getRegionLocations(tableName, EMPTY_START_ROW, replicaId,
           RegionLocateType.CURRENT, reload).get();
       }
@@ -464,9 +452,8 @@ public class TestAsyncNonMetaRegionLocator {
   public void testConcurrentUpdateCachedLocationOnError() throws Exception {
     createSingleRegionTable();
     HRegionLocation loc =
-        getDefaultRegionLocation(TABLE_NAME, EMPTY_START_ROW, RegionLocateType.CURRENT, false)
-            .get();
+      getDefaultRegionLocation(TABLE_NAME, EMPTY_START_ROW, RegionLocateType.CURRENT, false).get();
     IntStream.range(0, 100).parallel()
-        .forEach(i -> LOCATOR.updateCachedLocationOnError(loc, new NotServingRegionException()));
+      .forEach(i -> LOCATOR.updateCachedLocationOnError(loc, new NotServingRegionException()));
   }
 }
